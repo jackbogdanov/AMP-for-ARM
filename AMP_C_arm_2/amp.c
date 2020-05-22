@@ -1,13 +1,14 @@
 #include "amp.h"
-#include "lock.h"
-
-// 0x0c3179b2
-//--------------to h------------------------
-//#define START_ARM_BUFFER_POINTER 0x0c000020
-//#define START_DSP_BUFFER_POINTER 0x0c300020
+#include "utils/lock.h"
+#include "utils/clock.h"
 
 // functions number for available on DSP
 #define FUN_NUMBER 0;
+
+#define NET_HEADER_SIZE     7
+#define TRANSP_HEADER_SIZE  5
+#define REP_HEADER_SIZE     2
+
 
 #define MARKER_PACKAGE    0x21
 #define ANSWER_PACKAGE    0x41
@@ -23,36 +24,25 @@
 
 //#define DSP_START_BUFF_P_ADR    0x0c300004
 #define DSP_END_BUFF_P_ADR      0x0c180008
+#define DSP_START_FLAG          0x0c00000c
 #define DSP_BUFF_SIZE           0x0c180000
 #define START_DSP_BUFF          0x0c180024
-//--------------to h------------------------
+
+#define MAX_PACK_SIZE 255
 
 
-#define PACK_SIZE 18
-unsigned char package[PACK_SIZE];
+unsigned char package[MAX_PACK_SIZE];
 unsigned char *main_pointer;
 
-net_p sending_package;
-
+int current_pack_size;
 char current_state;
 int trusactions_count;
+char destination;
+
 
 unsigned int *last_end_arm_buff;
 
-//init TODO
-
-void write_num(unsigned int num, int bytes_count) {
-
-
-    for(int i = bytes_count - 1; i >= 0; --i) {
-        int mask = 0x000000FF;
-
-        mask = mask << i*8;
-
-        *main_pointer = (num & mask) >> i*8;
-        main_pointer++;
-    }
-}
+void wait_new();
 
 unsigned int read_num_by_adr(int bytes_count, unsigned char **buff) {
 
@@ -74,6 +64,11 @@ unsigned int read_num_by_adr(int bytes_count, unsigned char **buff) {
 
 void write_num_by_adr(unsigned int num, int bytes_count, unsigned char **buff) {
 
+    if (bytes_count == 1) {
+        **buff = (unsigned char) num;
+        *buff += 1;
+        return;
+    }
 
     for(int i = bytes_count - 1; i >= 0; --i) {
         int mask = 0x000000FF;
@@ -85,16 +80,24 @@ void write_num_by_adr(unsigned int num, int bytes_count, unsigned char **buff) {
     }
 }
 
-void init() {
+void write_num(unsigned int num, int bytes_count) {
+    write_num_by_adr(num, bytes_count, &main_pointer);
+}
+
+void init(char to) {
     current_state = 'A';
     main_pointer = (unsigned char *) &package;
-
+    destination = to;
     trusactions_count = 0;
+
+// ------- for testing without DSP program -----------------------
 
 //    int *p1 = (int *) DSP_END_BUFF_P_ADR;
 //    *p1 = 0x0c18011F;
 //    p1 = (int *) DSP_BUFF_SIZE;
 //    *p1 = 0x00000100;
+
+// ---------------------------------------------------------------
 
     last_end_arm_buff = (unsigned int *) START_ARM_BUFF;
 
@@ -106,9 +109,25 @@ void init() {
     p1 = (int *) ARM_END_BUFF_P_ADR;
     *p1 = START_ARM_BUFF;
 
-    //timer
-    //dsp_buff = START_DSP_BUFFER_POINTER;
+    current_pack_size = 17;
+
+    unsigned int *p_dsp_start = (unsigned int *) DSP_START_FLAG;
+
+    *p_dsp_start = 1;
 }
+
+void net_level_read() {
+
+    unsigned char dest = *(main_pointer + current_pack_size - 1);
+    unsigned char from = *(main_pointer + current_pack_size - 2);
+    unsigned int control_sum = *(main_pointer + current_pack_size - 3);
+
+    if (dest != CORE_ID || from != destination || control_sum != 0) {
+        wait_new();
+        return;
+    }
+}
+
 
 void read_low_level() {
     unsigned int *p_start   = (unsigned int *) ARM_START_BUFF_P_ADR;
@@ -116,52 +135,80 @@ void read_low_level() {
     unsigned char *buff = (unsigned char *) *p_start;
 
     int buff_size = *(unsigned int *) ARM_BUFF_SIZE;
-
-
-    // write size
-    int pack_size = read_num_by_adr(2, &buff); //*((short *) buff); //PACK_SIZE;
+    int pack_size = read_num_by_adr(2, &buff);
 
     int readed_bytes = 0;
 
     for(char i = 0; i < pack_size; ++i) {
 
         if (buff + i < (unsigned char *) START_ARM_BUFF + buff_size) {
-            *(package + i) = *(buff + i);
+            *(package + pack_size - i - 1) = *(buff + i);
             readed_bytes++;
         } else {
-            *(package + i) = *((unsigned char *) START_ARM_BUFF + i - readed_bytes);
+            *(package + pack_size - i - 1) = *((unsigned char *) START_ARM_BUFF + i - readed_bytes);
         }
 
     }
 
 
     if (readed_bytes == pack_size) {
-        *p_start += pack_size;
+        *p_start += pack_size + 2;
     } else {
-        *p_start = START_ARM_BUFF + pack_size - readed_bytes;
+        *p_start = START_ARM_BUFF + pack_size + 2 - readed_bytes;
     }
 
+    current_pack_size = pack_size;
+    last_end_arm_buff = (unsigned int *) *p_start;
+
+    main_pointer = (unsigned char *) &package;
+
+    net_level_read();
 }
 
-void wait_new() {
-//    resetTimeshtamp();
-//
-//    unsigned int start_time = getTimeshtamp();
-//    unsigned int end_time = getTimeshtamp();
+void send_low_level() {
+    unsigned int *p_end = (unsigned int *) DSP_END_BUFF_P_ADR;
 
-//Time delay TODO
-//    while (true) {
-//        while(end_time - start_time < cycles_wait) {
-//            end_time = getTimeshtamp();
-//        }
-//
-//        send_low_level(); //retry_send
-//
-//    }
+    unsigned char *buff = (unsigned char *) *p_end;
+
+    int buff_size = *(unsigned int *) DSP_BUFF_SIZE;
+
+    write_num_by_adr(current_pack_size, 2, &buff);
+
+    int written_bytes = 0;
+
+    for(char i = 0; i < current_pack_size; ++i) {
+
+        if (buff + i < (unsigned char *) START_DSP_BUFF + buff_size) {
+            *(buff + i) = *(package + current_pack_size - i - 1);
+            written_bytes++;
+        } else {
+            *((unsigned char *) START_DSP_BUFF + i - written_bytes) = *(package + current_pack_size - i - 1);
+        }
+
+    }
+
+
+    if (written_bytes == current_pack_size) {
+        *p_end += current_pack_size + 2;
+    } else {
+        *p_end = START_DSP_BUFF + current_pack_size - written_bytes + 2;
+    }
+}
+
+
+void wait_new() {
+    resetTimeshtamp();
+    unsigned long long start_time = getTimeshtamp();
 
     unsigned int *p = (unsigned int *) ARM_END_BUFF_P_ADR;
 
-    while((unsigned int *) *p == last_end_arm_buff) {}
+    while((unsigned int *) *p == last_end_arm_buff) {
+        if (getTimeshtamp() - start_time > WAIT) {
+            send_low_level();
+            resetTimeshtamp();
+            start_time = getTimeshtamp();
+        }
+    }
 
     last_end_arm_buff = (unsigned int *) *p;
 
@@ -169,71 +216,102 @@ void wait_new() {
 }
 
 
-void send_low_level() {
-    unsigned int *p_end   = (unsigned int *) DSP_END_BUFF_P_ADR;
-       //unsigned char *p_start = (unsigned char *) DSP_START_BUFF_P_ADR;
 
-    unsigned char *buff = (unsigned char *) *p_end;
+void net_level_send() {
 
-    int buff_size = *(unsigned int *) DSP_BUFF_SIZE;
+    write_num(0, 3);            //control sum null for now
 
-    write_num_by_adr(18, 2, &buff);
+    write_num(CORE_ID, 1);      //from field
 
-    int written_bytes = 0;
-
-    for(char i = 0; i < PACK_SIZE; ++i) {
-
-        if (buff + i < (unsigned char *) START_DSP_BUFF + buff_size) {
-            *(buff + i) = *(package + PACK_SIZE - i - 1);
-            written_bytes++;
-        } else {
-            *((unsigned char *) START_DSP_BUFF + i - written_bytes) = *(package + PACK_SIZE - i - 1);
-        }
-
-    }
-
-
-    if (written_bytes == PACK_SIZE) {
-        *p_end += PACK_SIZE + 2;
-    } else {
-        *p_end = START_DSP_BUFF + PACK_SIZE - written_bytes + 2;
-    }
-
-
-    wait_new();
-}
-
-void net_level() {
-
-    //control sum null for now
-
-    write_num(0x222222, 3);
-
-    //*main_pointer = MARKER_TYPE;
-    *main_pointer = 0x21;
-    main_pointer++;
-
-    *main_pointer = 0xc1;//CORE_ID;
-    main_pointer++;
-
-    *main_pointer = DSP_CORE_ID;
-        main_pointer++;
+    write_num(destination, 1);  //destination field
 
 
     send_low_level();
-
-    //control sum check, not needed now
 }
 
-
 void send_tarnsp_mess(unsigned char type) {
-    *main_pointer = type;
-    main_pointer++;
 
-    write_num(0x33333333, 4);  //trusactions_count;
+    write_num(trusactions_count, 4);    //trusactions_count;
+    write_num(type, 1);                 //type of transport packet
 
-    trusactions_count++;
-    net_level();
+    net_level_send();
+
+    wait_new();
+
+    main_pointer = main_pointer + current_pack_size - NET_HEADER_SIZE - 3;
+}
+
+int handle_state_B(unsigned char type) {
+
+    switch(type) {
+        case ANSWER_PACKAGE:
+            send_tarnsp_mess(END_TRANS_PACKAGE);
+            current_state = 'C';
+            break;
+
+        case MARKER_PACKAGE:
+        case END_TRANS_PACKAGE:
+            send_tarnsp_mess(ERROR_PACKAGE);
+            break;
+
+        case ERROR_PACKAGE:
+            send_tarnsp_mess(ANSWER_PACKAGE);
+            break;
+
+        default:
+            return -1;
+    }
+
+    return 1;
+}
+
+int handle_state_C(unsigned char type) {
+
+    switch(type) {
+        case MARKER_PACKAGE:
+            send_tarnsp_mess(ANSWER_PACKAGE);
+            current_state = 'D';
+            break;
+
+        case ANSWER_PACKAGE:
+            send_tarnsp_mess(END_TRANS_PACKAGE);
+            break;
+        case END_TRANS_PACKAGE:
+            wait_new();
+            break;
+
+        case ERROR_PACKAGE:
+            current_state = 'B';
+            break;
+
+        default:
+            return -1;
+    }
+
+    return 1;
+}
+
+int handle_state_D(unsigned char type) {
+
+    switch(type) {
+        case MARKER_PACKAGE:
+            send_tarnsp_mess(ANSWER_PACKAGE);
+            break;
+
+        case ANSWER_PACKAGE:
+        case ERROR_PACKAGE:
+            send_tarnsp_mess(ERROR_PACKAGE);
+            break;
+
+        case END_TRANS_PACKAGE:
+            current_state = 'A';
+            break;
+
+        default:
+            return -1;
+    }
+
+    return 1;
 }
 
 int transp_marker_level() {
@@ -242,69 +320,53 @@ int transp_marker_level() {
         return -1;
     }
 
-    unsigned char * type_check = main_pointer;
-    current_state = 'B';
+    trusactions_count++;
 
-    send_tarnsp_mess(MARKER_PACKAGE);   // send type 1 pack
-    main_pointer = type_check;
+    int err = 1;
 
-    if (*type_check != ANSWER_PACKAGE) { // if answer is not type 2
-        //ERROR
-        return -1;
-    }
+    do {
+        switch(current_state) {
+        case 'A':
+            current_state = 'B';
+            send_tarnsp_mess(MARKER_PACKAGE);
+            break;
+        case 'B':
+            err = handle_state_B(*(main_pointer + 4));
+            break;
+        case 'C':
+            err = handle_state_C(*(main_pointer + 4));
+            break;
+        case 'D':
+            err = handle_state_D(*(main_pointer + 4));
+            break;
+        }
 
-    send_tarnsp_mess(END_TRANS_PACKAGE); //send type 3 pack
-    main_pointer = type_check;
+        if (err == -1) {
+            return -1;
+        }
 
-    current_state = 'C';
-
-    if (*type_check != MARKER_PACKAGE) { // start getting marker
-        //ERROR
-        return -1;
-    }
-
-    current_state = 'D';
-
-    send_tarnsp_mess(ANSWER_PACKAGE); //send type 2 pack
-
-    if (*type_check != END_TRANS_PACKAGE) { // start getting marker
-        //ERROR
-        return -1;
-    }
-
-    current_state = 'A';
+    } while (current_state != 'A');
 
     return 1;
-
 }
 
 int rep_level() {
 
-    write_num(0x7777, 2);       //nothing code algorithm
+    write_num(0, 2);            //nothing code algorithm
 
     return transp_marker_level();
 }
 
 
 
-int give_marker(char task_id) {
-     init();
+void give_marker(marker * m) {
+     init(m->to);
 
-     *main_pointer = task_id; //data
-     main_pointer++;
+     write_num(m->fun_num, 1);   //data
+     write_num(m->to, 1);        //resiver_number
+     write_num(-1, 1);           //result
+     write_num(m->size, 2);      //size
 
-     *main_pointer = 1;       //resiver_number
-     main_pointer++;
-
-     *main_pointer = -1;      //result
-     main_pointer++;
-
-     write_num(0x1234, 2);    //size
-
-     return rep_level();
+     m->result = rep_level();
 }
 
-//void main_amp() {
-//    init();
-//    give_marker(0x111);
-//}

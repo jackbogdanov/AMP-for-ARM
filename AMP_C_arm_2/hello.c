@@ -11,19 +11,16 @@
 
 Int main()
 { 
-   // System_printf("size:   %d", sizeof(short));
-//    enableTimeshtamp();
-//
-//    int t = getTimeshtamp();
-//
-//    //main_amp();
-//    System_printf("size:   %d \n", t);
-//    resetTimeshtamp();
-//
-//    int t1 = getTimeshtamp();
-//    System_printf("size:   %d \n", t1);
+    marker test_marker;
 
-    give_marker(0x99);
+    test_marker.to = DSP_CORE_ID;
+    test_marker.result = -1;
+    test_marker.size = 1;
+    test_marker.fun_num = 0x99;
+
+    give_marker(&test_marker);
+
+    System_printf("size:   %d \n", test_marker.result);
 
     return(0);
 }

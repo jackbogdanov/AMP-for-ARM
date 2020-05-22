@@ -2,7 +2,7 @@
 #include "clock.h"
 
 
-unsigned int getTimeshtamp() {
+unsigned long long getTimeshtamp() {
 
     unsigned cc;
 
